@@ -5,48 +5,33 @@ import numpy as np
 import sqlite3
 
 # --- PAGE CONFIG ---
-st.set_page_config(page_title="NBA Game Clock Predictor", layout="wide")
+st.set_page_config(page_title="NBA Live Time Predictor", layout="wide")
 
 # --- LOAD ASSETS ---
 @st.cache_resource
 def load_assets():
-    # These files must be in the root of your GitHub repository
+    # Load the trained Random Forest and Scaler from your repo
     rf_model = joblib.load('nba_rf_model.pkl')
     scaler = joblib.load('nba_scaler.pkl')
     return rf_model, scaler
 
 rf_model, scaler = load_assets()
 
-# Feature list must match the exact order used during model training
 FEATURES = [
-    'clock_seconds',
-    'game_clock_elapsed',
-    'scoring_margin',
-    'is_close_game',
-    'last_four_min',
-    'last_two_min',
-    'foul_rate_20',
-    'is_foul_cum',
-    'is_foul_last4_cum',
-    'is_timeout_last4_cum',
-    'is_ft_last4_cum',
-    'is_turnover_last4_cum',
-    'is_review_cum',
-    'teamId',
-    'pace',
-    'real_vs_clock_ratio'
+    'clock_seconds', 'game_clock_elapsed', 'scoring_margin', 'is_close_game',
+    'last_four_min', 'last_two_min', 'foul_rate_20', 'is_foul_cum',
+    'is_foul_last4_cum', 'is_timeout_last4_cum', 'is_ft_last4_cum',
+    'is_turnover_last4_cum', 'is_review_cum', 'teamId', 'pace', 'real_vs_clock_ratio'
 ]
 
 # --- DATABASE LOGIC ---
 def get_game_data(game_id):
     try:
         g_id_int = int(game_id)
-        # Identify which of the 8 partition files contains this game via modulo
         partition_index = g_id_int % 8
         db_name = f'nba_part_{partition_index}.db'
-        
         conn = sqlite3.connect(db_name)
-        # Query the latest state of the game
+        # Pull latest game state from partition
         query = "SELECT * FROM play_by_play WHERE game_id = ? ORDER BY game_clock_elapsed DESC LIMIT 1"
         df = pd.read_sql(query, conn, params=(g_id_int,))
         conn.close()
@@ -56,106 +41,114 @@ def get_game_data(game_id):
 
 # --- UI HEADER ---
 st.title("NBA Advanced Game Duration Predictor")
-st.markdown("Input a Game ID to auto-fill stats or manually adjust features below to see the prediction update in real-time.")
 
-# --- GAME LOOKUP ---
-game_id_input = st.text_input("Enter NBA Game ID (e.g. 22000001)", "")
+# --- GAME LOOKUP & TEAM LOGO ---
+col_search, col_logo = st.columns([3, 1])
 
-# Initialize default values with safe types to prevent TypeErrors
+with col_search:
+    game_id_input = st.text_input("Enter NBA Game ID (e.g. 22000001)", "")
+
+# Default values
 defaults = {f: 0.0 for f in FEATURES}
 defaults['pace'] = 100.0
 defaults['clock_seconds'] = 300.0
-defaults['game_clock_elapsed'] = 2580.0
-defaults['teamId'] = 0
+defaults['teamId'] = 1610612747 # Default Lakers ID
 
 if game_id_input:
     lookup_df = get_game_data(game_id_input)
     if not lookup_df.empty:
-        st.success(f"Game data found for Game ID {game_id_input}")
+        st.success(f"Game data synced.")
         for f in FEATURES:
             if f in lookup_df.columns:
-                val = lookup_df.iloc[0][f]
-                # Only update if the value is not null
-                if pd.notnull(val):
-                    defaults[f] = val
+                defaults[f] = lookup_df.iloc[0][f]
     else:
-        st.warning("Game ID not found in the database partitions. Please enter stats manually.")
+        st.warning("Game ID not found. Using manual inputs.")
 
-# --- FEATURE INPUTS ---
+with col_logo:
+    # Fetch team logo from NBA CDN based on teamId
+    t_id = int(defaults['teamId'])
+    logo_url = f"https://cdn.nba.com/logos/nba/{t_id}/global/L/logo.svg"
+    st.image(logo_url, width=100)
+
+# --- FEATURE INPUTS & LIVE CALCULATOR ---
 st.divider()
 col1, col2, col3 = st.columns(3)
 
 with col1:
-    st.subheader("Time and Pace")
+    st.subheader("Game Clock")
+    # Fan-friendly time display
+    mins = st.number_input("Minutes Left in 4th", 0, 12, int(defaults['clock_seconds'] // 60))
+    secs = st.number_input("Seconds Left in 4th", 0, 59, int(defaults['clock_seconds'] % 60))
     
-    # Fan-friendly time inputs
-    fan_mins = st.number_input("Minutes Left in 4th", 0, 12, int(defaults['clock_seconds'] // 60))
-    fan_secs = st.number_input("Seconds Left in 4th", 0, 59, int(defaults['clock_seconds'] % 60))
-    
-    # Internal conversion for model features
-    clock_seconds = (fan_mins * 60) + fan_secs
-    # NBA Q4 starts at 2160 elapsed seconds (3 quarters * 720s)
+    # Internal model conversion
+    clock_seconds = (mins * 60) + secs
     game_clock_elapsed = 2160 + (720 - clock_seconds)
     
-    st.info(f"Current Game State: {fan_mins:02d}:{fan_secs:02d} remaining in the 4th Quarter")
+    # Visual Clock Graphic
+    st.markdown(f"""
+    <div style="background-color:black; color:orange; padding:10px; border-radius:10px; text-align:center; font-family:monospace; font-size:40px; border: 2px solid #333;">
+        4TH {mins:02d}:{secs:02d}
+    </div>
+    """, unsafe_allow_html=True)
     
     pace = st.number_input("Current Pace", 0.0, 250.0, float(defaults['pace']))
 
 with col2:
-    st.subheader("Score and Context")
-    scoring_margin = st.number_input("Scoring Margin", 0, 100, int(defaults['scoring_margin']))
+    st.subheader("Scoreboard")
+    margin = st.number_input("Scoring Margin", 0, 100, int(defaults['scoring_margin']))
     
-    # Safety check for teamId
-    teamId_val = defaults.get('teamId', 0)
-    teamId = st.number_input("Team ID", value=int(teamId_val if teamId_val is not None else 0))
-    
-    st.write("Game State Flags")
-    is_close_game = st.checkbox("Is Close Game (Margin ≤ 5)", value=(scoring_margin <= 5))
-    last_four_min = st.checkbox("Last 4 Minutes", value=(clock_seconds <= 240))
-    last_two_min = st.checkbox("Last 2 Minutes", value=(clock_seconds <= 120))
+    # Live Feature Toggles
+    is_close = st.checkbox("Clutch Time (Margin ≤ 5)", value=(margin <= 5))
+    is_last_4 = st.checkbox("Final 4 Minutes", value=(clock_seconds <= 240))
+    is_last_2 = st.checkbox("Two Minute Warning", value=(clock_seconds <= 120))
 
 with col3:
-    st.subheader("Fouls and Stoppages")
-    foul_rate_20 = st.number_input("Foul Rate (Last 20 Events)", 0.0, 20.0, float(defaults['foul_rate_20']))
-    is_foul_cum = st.number_input("Total Cumulative Fouls", 0, 200, int(defaults['is_foul_cum']))
-    is_foul_last4_cum = st.number_input("Fouls in Last 4 Min", 0, 100, int(defaults['is_foul_last4_cum']))
-    is_timeout_last4_cum = st.number_input("Timeouts in Last 4 Min", 0, 20, int(defaults['is_timeout_last4_cum']))
-    is_ft_last4_cum = st.number_input("Free Throws in Last 4 Min", 0, 100, int(defaults['is_ft_last4_cum']))
-    is_turnover_last4_cum = st.number_input("Turnovers in Last 4 Min", 0, 50, int(defaults['is_turnover_last4_cum']))
-    is_review_cum = st.number_input("Total Reviews/Challenges", 0, 20, int(defaults['is_review_cum']))
+    st.subheader("NBA Rules & Stoppages")
+    # Toggling these now updates the prediction instantly
+    reviews = st.number_input("Official Reviews (Cumulative)", 0, 10, int(defaults['is_review_cum']))
+    timeouts = st.number_input("Timeouts in Last 4 Min", 0, 20, int(defaults['is_timeout_last4_cum']))
+    fouls_last_4 = st.number_input("Fouls in Last 4 Min", 0, 30, int(defaults['is_foul_last4_cum']))
+    ft_last_4 = st.number_input("FTs in Last 4 Min", 0, 50, int(defaults['is_ft_last4_cum']))
 
-# --- LIVE PREDICTION ---
-st.divider()
-
-# Consolidate data for the model
+# --- LIVE PREDICTION ENGINE ---
 input_dict = {
     'clock_seconds': clock_seconds,
     'game_clock_elapsed': game_clock_elapsed,
-    'scoring_margin': scoring_margin,
-    'is_close_game': int(is_close_game),
-    'last_four_min': int(last_four_min),
-    'last_two_min': int(last_two_min),
-    'foul_rate_20': foul_rate_20,
-    'is_foul_cum': is_foul_cum,
-    'is_foul_last4_cum': is_foul_last4_cum,
-    'is_timeout_last4_cum': is_timeout_last4_cum,
-    'is_ft_last4_cum': is_ft_last4_cum,
-    'is_turnover_last4_cum': is_turnover_last4_cum,
-    'is_review_cum': is_review_cum,
-    'teamId': teamId,
+    'scoring_margin': margin,
+    'is_close_game': int(is_close),
+    'last_four_min': int(is_last_4),
+    'last_two_min': int(is_last_2),
+    'foul_rate_20': float(defaults['foul_rate_20']),
+    'is_foul_cum': int(defaults['is_foul_cum']),
+    'is_foul_last4_cum': fouls_last_4,
+    'is_timeout_last4_cum': timeouts,
+    'is_ft_last4_cum': ft_last_4,
+    'is_turnover_last4_cum': int(defaults['is_turnover_last4_cum']),
+    'is_review_cum': reviews,
+    'teamId': int(defaults['teamId']),
     'pace': pace,
-    'real_vs_clock_ratio': 2.7  # Using fixed standard ratio for cleaner UI
+    'real_vs_clock_ratio': 2.7 # Standardized ratio to prevent UI clutter
 }
 
 X_input = pd.DataFrame([input_dict])[FEATURES]
 
-# Perform live prediction
+# Instant prediction
 prediction = rf_model.predict(X_input)[0]
 final_pred = max(0, prediction)
-minutes, seconds = divmod(int(final_pred), 60)
+minutes_rem, seconds_rem = divmod(int(final_pred), 60)
 
-st.markdown("### Live Prediction Result")
-st.metric(label="Estimated Real-World Time Remaining", value=f"{minutes}m {seconds:02d}s")
+# --- RESULTS DISPLAY ---
+st.divider()
+res_col1, res_col2 = st.columns([2, 1])
 
-with st.expander("View Technical Feature Data"):
-    st.write(X_input)
+with res_col1:
+    st.markdown("### Estimated Real-World Time Remaining")
+    st.metric(label="", value=f"{minutes_rem}m {seconds_rem:02d}s")
+
+with res_col2:
+    # Model interpretation: Explain why the time is what it is
+    st.write("**Model Context:**")
+    if reviews > 0:
+        st.caption(f"Review delay included (+~2.5m per review).")
+    if is_close:
+        st.caption("Clutch logic active: Expect more strategic timeouts.")
